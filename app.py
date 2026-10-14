@@ -21,16 +21,33 @@ if "history" not in st.session_state: st.session_state.history=[]
 
 st.header("1. เลือกจังหวัดและอัปเดตข้อมูล API")
 province=st.selectbox("จังหวัดของพื้นที่ที่ต้องการวิเคราะห์ (77 จังหวัด)",list(PROVINCES.keys()),index=list(PROVINCES.keys()).index("ฉะเชิงเทรา"))
-if st.button("🔄 อัปเดตข้อมูล ThaiWater + สภาพอากาศ",use_container_width=True):
+# ดึงข้อมูลใหม่โดยอัตโนมัติเมื่อเลือกจังหวัดที่ต่างจากข้อมูลใน session
+# ปุ่มอัปเดตยังใช้สำหรับบังคับดึงข้อมูลล่าสุดของจังหวัดเดิมได้
+province_changed = st.session_state.get("province_data_province") != province
+manual_refresh = st.button("🔄 อัปเดตข้อมูล ThaiWater + สภาพอากาศ", use_container_width=True)
+if province_changed or manual_refresh:
     try:
         with st.spinner(f"กำลังดึงข้อมูลล่าสุดของ {province}..."):
-            st.session_state.province_data=fetch_province_data(province)
-            st.session_state.weather_forecast=fetch_weather_forecast_7days(province)
-            st.session_state.province_data_province=province
-            st.session_state.weather_forecast_province=province
-            st.session_state.api_error=None
-    except Exception as e: st.session_state.api_error=str(e)
-if st.session_state.get("api_error"): st.error("ดึงข้อมูล API ไม่สำเร็จ: "+st.session_state.api_error)
+            fresh_data = fetch_province_data(province)
+            fresh_forecast = fetch_weather_forecast_7days(province)
+            st.session_state.province_data = fresh_data
+            st.session_state.weather_forecast = fresh_forecast
+            st.session_state.province_data_province = province
+            st.session_state.weather_forecast_province = province
+            st.session_state.api_error = None
+            # ล้างผลเดิม เพื่อไม่ให้ผลของจังหวัดก่อนหน้าค้างอยู่
+            for key in ("prediction", "model_prediction", "probabilities", "reasons", "prediction_province", "prediction_data_updated_at"):
+                st.session_state.pop(key, None)
+    except Exception as e:
+        st.session_state.api_error = str(e)
+        # ป้องกันการนำข้อมูลของจังหวัดก่อนหน้ามาใช้วิเคราะห์
+        if st.session_state.get("province_data_province") != province:
+            st.session_state.pop("province_data", None)
+            st.session_state.pop("weather_forecast", None)
+            st.session_state.pop("province_data_province", None)
+            st.session_state.pop("weather_forecast_province", None)
+if st.session_state.get("api_error"):
+    st.error("ดึงข้อมูล API ไม่สำเร็จ: " + st.session_state.api_error)
 
 data=st.session_state.get("province_data")
 if data and st.session_state.get("province_data_province")==province:
@@ -172,22 +189,85 @@ else:
     st.caption("แหล่งข้อมูลแผนที่: RID SWOC/HII → ThaiWater → Open-Meteo (สำรองอัตโนมัติ)")
 
 st.header("2. AI Flood Risk Analysis")
-if data and data.get("water_level_m") is not None:
-    if st.button("🔎 วิเคราะห์ความเสี่ยงด้วย AI",type="primary",use_container_width=True):
-        model_pred,model_probs=predict_risk(data); final,final_probs,reasons=apply_realtime_safety_layer(model_pred,model_probs,data)
-        st.session_state.prediction=final; st.session_state.model_prediction=model_pred; st.session_state.probabilities=final_probs; st.session_state.reasons=reasons
-        st.session_state.history.insert(0,{"จังหวัด":province,"ฝน1ชม.(mm)":data['rainfall_1h'],"ฝน24ชม.(mm)":data['rainfall_24h'],"ฝน3วัน(mm)":data['rainfall_3d'],"ระดับน้ำ(m)":data['water_level_m'],"ล้นตลิ่ง":data['overbank_count'],"AI Model":model_pred,"Final Risk":final})
+# ผลวิเคราะห์ต้องผูกกับจังหวัดและ timestamp ของข้อมูลที่กำลังแสดงในข้อ 1
+if data and st.session_state.get("province_data_province") == province:
+    data_updated_at = str(data.get("updated_at", "ไม่ระบุเวลา"))
+    prediction_is_current = (
+        st.session_state.get("prediction_province") == province
+        and st.session_state.get("prediction_data_updated_at") == data_updated_at
+    )
+    if data.get("water_level_m") is None:
+        st.warning(f"จังหวัด{province} ยังไม่มีข้อมูลระดับน้ำเพียงพอ จึงไม่แสดงผลวิเคราะห์ใหม่")
+        for key in ("prediction", "model_prediction", "probabilities", "reasons", "prediction_province", "prediction_data_updated_at"):
+            st.session_state.pop(key, None)
+    else:
+        if not prediction_is_current:
+            try:
+                model_pred, model_probs = predict_risk(data)
+                final, final_probs, reasons = apply_realtime_safety_layer(model_pred, model_probs, data)
+                st.session_state.prediction = final
+                st.session_state.model_prediction = model_pred
+                st.session_state.probabilities = final_probs
+                st.session_state.reasons = reasons
+                st.session_state.prediction_province = province
+                st.session_state.prediction_data_updated_at = data_updated_at
+                st.session_state.history.insert(0, {
+                    "จังหวัด": province,
+                    "ฝน1ชม.(mm)": data.get("rainfall_1h"),
+                    "ฝน24ชม.(mm)": data.get("rainfall_24h"),
+                    "ฝน3วัน(mm)": data.get("rainfall_3d"),
+                    "ระดับน้ำ(m)": data.get("water_level_m"),
+                    "ล้นตลิ่ง": data.get("overbank_count"),
+                    "AI Model": model_pred,
+                    "Final Risk": final,
+                    "อัปเดตข้อมูล": data_updated_at,
+                })
+            except Exception as e:
+                st.error(f"ไม่สามารถวิเคราะห์ข้อมูลของจังหวัด{province} ได้: {e}")
+        st.caption(f"จังหวัดที่วิเคราะห์: {province} | อ้างอิงข้อมูลล่าสุด: {data_updated_at}")
+        if st.button("🔎 วิเคราะห์ซ้ำจากข้อมูลจังหวัดนี้", type="primary", use_container_width=True):
+            try:
+                model_pred, model_probs = predict_risk(data)
+                final, final_probs, reasons = apply_realtime_safety_layer(model_pred, model_probs, data)
+                st.session_state.prediction = final
+                st.session_state.model_prediction = model_pred
+                st.session_state.probabilities = final_probs
+                st.session_state.reasons = reasons
+                st.session_state.prediction_province = province
+                st.session_state.prediction_data_updated_at = data_updated_at
+                st.session_state.history.insert(0, {
+                    "จังหวัด": province,
+                    "ฝน1ชม.(mm)": data.get("rainfall_1h"),
+                    "ฝน24ชม.(mm)": data.get("rainfall_24h"),
+                    "ฝน3วัน(mm)": data.get("rainfall_3d"),
+                    "ระดับน้ำ(m)": data.get("water_level_m"),
+                    "ล้นตลิ่ง": data.get("overbank_count"),
+                    "AI Model": model_pred,
+                    "Final Risk": final,
+                    "อัปเดตข้อมูล": data_updated_at,
+                })
+                st.rerun()
+            except Exception as e:
+                st.error(f"ไม่สามารถวิเคราะห์ข้อมูลของจังหวัด{province} ได้: {e}")
 else:
-    st.warning("ต้องมีข้อมูลระดับน้ำจาก ThaiWater ก่อนจึงจะวิเคราะห์อัตโนมัติได้")
-if "prediction" in st.session_state:
-    labels={"LOW":"🟢 ความเสี่ยงต่ำ","MEDIUM":"🟡 ความเสี่ยงปานกลาง","HIGH":"🔴 ความเสี่ยงสูง"}
-    st.success(f"ผลการประเมิน: {labels[st.session_state.prediction]}")
-    if st.session_state.get("model_prediction")!=st.session_state.prediction:
+    st.warning("กรุณารอให้ข้อ 1 ดึงข้อมูลของจังหวัดที่เลือกสำเร็จก่อน ระบบจึงจะวิเคราะห์ความเสี่ยงจากข้อมูลชุดเดียวกันได้")
+
+if ("prediction" in st.session_state
+        and st.session_state.get("prediction_province") == province
+        and st.session_state.get("province_data_province") == province):
+    labels = {"LOW": "🟢 ความเสี่ยงต่ำ", "MEDIUM": "🟡 ความเสี่ยงปานกลาง", "HIGH": "🔴 ความเสี่ยงสูง"}
+    st.success(f"ผลการประเมินจังหวัด{province}: {labels[st.session_state.prediction]}")
+    if st.session_state.get("model_prediction") != st.session_state.prediction:
         st.warning(f"AI Model เดิมประเมิน {st.session_state.model_prediction} แต่ Real-time Water Safety Layer ปรับเป็น {st.session_state.prediction} จากข้อมูลสถานีจริง")
     if st.session_state.get("reasons"):
         st.write("**เหตุผลจากข้อมูลปัจจุบัน:**")
-        for r in st.session_state.reasons: st.write("• "+r)
-    p=st.session_state.probabilities; a,b,c=st.columns(3); a.metric("LOW",f"{p.get('LOW',0)*100:.2f}%"); b.metric("MEDIUM",f"{p.get('MEDIUM',0)*100:.2f}%"); c.metric("HIGH",f"{p.get('HIGH',0)*100:.2f}%")
+        for r in st.session_state.reasons:
+            st.write("• " + r)
+    p = st.session_state.probabilities
+    a, b, c = st.columns(3)
+    a.metric("LOW", f"{p.get('LOW', 0)*100:.2f}%")
+    b.metric("MEDIUM", f"{p.get('MEDIUM', 0)*100:.2f}%")
+    c.metric("HIGH", f"{p.get('HIGH', 0)*100:.2f}%")
 
 st.header("3. AI Model Performance")
 a,b,c=st.columns(3); a.metric("Model Accuracy",f"{bundle['accuracy']*100:.2f}%"); b.metric("Decision Trees",bundle['model'].n_estimators); c.metric("Training Dataset",len(df))
